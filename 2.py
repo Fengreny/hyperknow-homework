@@ -97,7 +97,7 @@ TOOL_MAP = {
 
 
 # ====================== 核心 Agent 逻辑 ======================
-class HyperknowAgent:
+class directorAgent:
     def __init__(self):
         # 启动对话会话（保存上下文）
         self.chat_session = model.start_chat(history=[])
@@ -194,6 +194,6 @@ class HyperknowAgent:
 # ====================== 运行测试 ======================
 if __name__ == "__main__":
     # 初始化无Schema的Agent
-    agent = HyperknowAgentNoSchema()
+    agent = directorAgent()
     # 运行测试
     agent.run("给我总结这学期天文课上的所有内容")
