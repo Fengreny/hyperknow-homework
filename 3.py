@@ -1,53 +1,50 @@
 import json
 import os
 import time
-import google.generativeai as genai
-from google.generativeai.types import content_types
-from collections import abc
+from openai import OpenAI
 from dotenv import load_dotenv
 
 # ====================== 0. 配置与初始化 ======================
 load_dotenv()
-genai.configure(api_key=os.environ["GEMINI_API_KEY"], transport='rest')
 
+# 配置代理地址和 Key
+# ⚠️ 注意：这里用的是 OpenAI 的 SDK，但是调用的是 Gemini 模型
+client = OpenAI(
+    api_key= os.getenv("GPTS_API_KEY"),  # 填入你在 gptsapi 的 key
+    base_url="https://api.gptsapi.net/v1"  # 代理地址
+)
 
-reply_model = genai.GenerativeModel("gemini-2.5-flash")
+MODEL_NAME = "gemini-3-pro-preview"  # 或者 gemini-1.5-pro
 
 
 # ====================== 1. 定义工具函数 ======================
 
-
 def memory_load_function(subject: str):
     """
     读取memory.json，查询用户指定科目的知识水平。
-
-    Args:
-        subject: 科目名称，例如 'astronomy', 'calculus' 等。
     """
     print(f"\n🔍 [Tool] 正在查询记忆库: {subject}")
     try:
+        # 确保你有 memory.json
         with open('memory.json', 'r', encoding='utf-8') as f:
             data = json.load(f)
         knowledge_levels = data.get("knowledge_levels", {})
-        # 模糊匹配处理
         if subject.lower() in knowledge_levels:
-            return knowledge_levels[subject.lower()]
+            return json.dumps(knowledge_levels[subject.lower()])  # 返回字符串
         else:
-            return {"error": f"未找到 {subject} 的记忆信息"}
+            return json.dumps({"error": f"未找到 {subject} 的记忆信息"})
     except Exception as e:
-        return {"error": f"读取记忆文件出错: {str(e)}"}
+        return json.dumps({"error": f"读取记忆文件出错: {str(e)}"})
 
 
 def select_files(query: str):
     """
     根据关键词搜索本地文件，返回相关文件名列表。
-
-    Args:
-        query: 搜索关键词，例如 'astronomy'。
     """
     print(f"\n📂 [Tool] 正在搜索文件关键词: {query}")
     found_files = []
     try:
+        # 确保你有 file_metadata.json
         with open('file_metadata.json', 'r', encoding='utf-8') as f:
             file_data = json.load(f)
         for filename, info in file_data.items():
@@ -55,19 +52,21 @@ def select_files(query: str):
             if query.lower() in content:
                 found_files.append(filename)
         print(f"   ✅ 找到 {len(found_files)} 个相关文件")
-        return found_files
+        return json.dumps(found_files)
     except Exception as e:
-        return {"error": f"搜索文件出错: {str(e)}"}
+        return json.dumps({"error": f"搜索文件出错: {str(e)}"})
 
 
-def reply_generator(file_titles: list[str], instruction: str):
+def reply_generator(file_titles_json: str, instruction: str):
     """
-    根据提供的文件列表和指令，流式生成回答。
-
-    Args:
-        file_titles: 需要参考的文件名列表。
-        instruction: 生成回复的具体指令。
+    生成最终回复。
+    注意：OpenAI Function Calling 传回来的是字符串，需要自己 json.loads 一下 file_titles
     """
+    try:
+        file_titles = json.loads(file_titles_json)
+    except:
+        file_titles = []  # 容错
+
     print(f"\n📝 [Tool] 正在调用回复生成器...")
     print(f"   参考文件: {file_titles}")
 
@@ -82,7 +81,6 @@ def reply_generator(file_titles: list[str], instruction: str):
     except Exception as e:
         return f"读取文件内容出错: {str(e)}"
 
-    # 构建最终生成的 Prompt
     final_prompt = f"""
     【角色】天文课助教
     【用户指令】{instruction}
@@ -91,85 +89,148 @@ def reply_generator(file_titles: list[str], instruction: str):
     """
 
     print("\n💡 [Stream] 开始流式输出回复: \n")
-    # 使用独立的 reply_model 进行流式生成，避免工具递归调用
-    response = reply_model.generate_content(final_prompt, stream=True)
+
+    # 使用 client.chat.completions.create 进行流式生成
+    stream = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": final_prompt}],
+        stream=True
+    )
 
     full_text = ""
-    for chunk in response:
-        if chunk.text:
-            print(chunk.text, end="", flush=True)
-            full_text += chunk.text
+    for chunk in stream:
+        if chunk.choices[0].delta.content:
+            content = chunk.choices[0].delta.content
+            print(content, end="", flush=True)
+            full_text += content
     print("\n")
 
     return "回复已生成完毕。"
 
 
-# 工具字典，用于手动执行
-functions = {
-    'memory_load_function': memory_load_function,
-    'select_files': select_files,
-    'reply_generator': reply_generator
-}
+# ====================== 2. 定义 Tools Schema (OpenAI 格式) ======================
+# OpenAI 需要显式定义 Schema，不像 Gemini SDK 那么智能自动生成
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_load_function",
+            "description": "读取memory.json，查询用户指定科目的知识水平。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "科目名称，例如 'astronomy', 'calculus' 等。"
+                    }
+                },
+                "required": ["subject"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "select_files",
+            "description": "根据关键词搜索本地文件，返回相关文件名列表。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词，例如 'astronomy'。"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reply_generator",
+            "description": "这是生成最终回复的唯一工具。根据提供的文件列表和指令，流式生成回答。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_titles_json": {
+                        "type": "string",
+                        "description": "需要参考的文件名列表，必须是 JSON 字符串格式，例如 '[\"file1.pdf\", \"file2.pdf\"]'。"
+                    },
+                    "instruction": {
+                        "type": "string",
+                        "description": "生成回复的具体指令。"
+                    }
+                },
+                "required": ["file_titles_json", "instruction"]
+            }
+        }
+    }
+]
 
-# ====================== 2. 初始化 Director Agent ======================
-# 将工具列表传给模型
-tools_list = [memory_load_function, select_files, reply_generator]
-director_model = genai.GenerativeModel("gemini-3-pro-preview", tools=tools_list)
+available_functions = {
+    "memory_load_function": memory_load_function,
+    "select_files": select_files,
+    "reply_generator": reply_generator,
+}
 
 
 # ====================== 3. 核心 Agent 逻辑 ======================
-class  directorAgent :
+class HyperknowAgent:
     def __init__(self):
-        # 开启自动函数调用设为 False，手动控制流程
-        self.chat = director_model.start_chat(enable_automatic_function_calling=False)
+        self.messages = []  # 手动维护历史记录
 
     def run(self, user_query: str):
         print(f"👤 用户指令：{user_query}")
+        self.messages.append({"role": "user", "content": user_query})
 
-        # 发送初始消息
-        response = self.chat.send_message(user_query)
-
-        # 循环处理：只要模型想调函数，就一直循环
         while True:
-            part = response.parts[0]
+            # 1. 发送请求给模型
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=self.messages,
+                tools=tools,
+                tool_choice="auto"
+            )
 
-            # 1. 检查是否有函数调用请求 (Function Call)
-            if part.function_call:
-                fc = part.function_call
-                func_name = fc.name
-                func_args = dict(fc.args)
+            response_message = response.choices[0].message
 
-                print(f"\n🤖 模型请求调用: {func_name}")
-                print(f"   参数: {func_args}")
+            # 2. 检查是否有函数调用
+            tool_calls = response_message.tool_calls
 
-                # 2. 执行函数
-                if func_name in functions:
-                    api_result = functions[func_name](**func_args)
-                else:
-                    api_result = {"error": "Function not found"}
+            if tool_calls:
+                # 把模型的回复（包含函数调用请求）加入历史
+                self.messages.append(response_message)
 
-                # 3. 构建函数响应 (Function Response)
-                # Gemini 需要特殊的格式把结果传回去
-                function_response_part = genai.protos.Part(
-                    function_response=genai.protos.FunctionResponse(
-                        name=func_name,
-                        response={'result': api_result}
+                for tool_call in tool_calls:
+                    function_name = tool_call.function.name
+                    function_to_call = available_functions[function_name]
+                    function_args = json.loads(tool_call.function.arguments)
+
+                    print(f"\n🤖 模型请求调用: {function_name}")
+                    print(f"   参数: {function_args}")
+
+                    # 3. 执行函数
+                    function_response = function_to_call(**function_args)
+
+                    # 4. 将结果回传给模型
+                    print(f"   📤 将结果回传给 Director Agent...")
+                    self.messages.append(
+                        {
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": function_response,
+                        }
                     )
-                )
-
-                # 4. 将结果发回给模型，让它决定下一步
-                print(f"   📤 将结果回传给 Director Agent...")
-                response = self.chat.send_message([function_response_part])
-
-            # 5. 如果是普通文本，说明任务结束（或者模型在自言自语）
-            elif part.text:
-                print(f"\n🎉 Director Agent 任务结束: {part.text}")
-                break
             else:
+                # 没有函数调用，说明任务结束
+                print(f"\n🎉 Director Agent 任务结束: {response_message.content}")
                 break
 
 
 # ====================== 运行测试 ======================
 if __name__ == "__main__":
-    agent = directorAgent()
+    # 确保目录下有 memory.json 和 file_metadata.json
+    agent = HyperknowAgent()
     agent.run("给我总结这学期天文课上的所有内容")
