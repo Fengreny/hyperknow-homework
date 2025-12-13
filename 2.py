@@ -3,7 +3,7 @@ import os
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-# ====================== 1. 初始化 Gemini API（无 Schema，极简） ======================
+# ====================== 加载apikey======================
 load_dotenv()
 
 
@@ -97,7 +97,7 @@ TOOL_MAP = {
 
 
 # ====================== 核心 Agent 逻辑 ======================
-class HyperknowAgentNoSchema:
+class HyperknowAgent:
     def __init__(self):
         # 启动对话会话（保存上下文）
         self.chat_session = model.start_chat(history=[])
@@ -191,7 +191,7 @@ class HyperknowAgentNoSchema:
             model_output = response.text.strip()
 
 
-# ====================== 4. 运行测试 ======================
+# ====================== 运行测试 ======================
 if __name__ == "__main__":
     # 初始化无Schema的Agent
     agent = HyperknowAgentNoSchema()
