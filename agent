@@ -1,0 +1,170 @@
+import json
+import os
+from typing import List, Dict, Optional, Union, Any
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+
+load_dotenv()
+
+# ==========================================
+# 配置
+# ==========================================
+MODEL_NAME = "gemini-3-pro-preview"
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MEMORY_FILE_PATH = os.path.join(BASE_DIR, "memory.json")
+METADATA_PATH = os.path.join(BASE_DIR, "file_metadata.json")
+
+# 加载数据
+MEMORY_DATA = {}
+if os.path.exists(MEMORY_FILE_PATH):
+    with open(MEMORY_FILE_PATH, 'r', encoding='utf-8') as f:
+        MEMORY_DATA = json.load(f)
+
+METADATA_DATA = {}
+if os.path.exists(METADATA_PATH):
+    with open(METADATA_PATH, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+        # 确保是字典格式
+        if isinstance(data, list):
+            for item in data:
+                METADATA_DATA[item.get('title', 'unknown')] = item
+        else:
+            METADATA_DATA = data
+
+
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+
+# ==========================================
+# Tools 
+# ==========================================
+
+def retrieve_user_knowledge(subjects: list[str]) -> dict:
+    """Retrieves the user's proficiency levels for specific subjects.
+
+    Use this tool to understand what the user already knows before explaining complex topics.
+
+    Args:
+        subjects: A list of subjects to check (e.g., ['calculus', 'python']).
+
+    Returns:
+        A dictionary mapping subjects to their knowledge levels.
+    """
+    print(f"\n[Tool Call] Checking knowledge for: {subjects}")
+    try:
+        knowledge_base = MEMORY_DATA.get("knowledge_levels", {})
+        result = {}
+        for subject in subjects:
+            key = str(subject).lower().strip()
+            result[key] = knowledge_base.get(key, "unknown")
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def select_files(query: str) -> list[str]:
+    """Searches for relevant local files based on keywords.
+
+    CRITICAL SEARCH STRATEGY:
+    The database contains specific filenames (e.g., 'Sun', 'Orbit'). It does NOT contain
+    general categories like 'Astronomy'. You MUST expand general queries into specific
+    keywords.
+
+    Example: Query 'Astronomy' -> Search for 'sun', 'planet', 'star'.
+
+    Args:
+        query: The search keywords string.
+
+    Returns:
+        A list of relevant file contents (truncated if too long).
+    """
+    print(f"\n[Tool Call] Searching files with query: '{query}'")
+    try:
+        keywords = query.lower().split()
+        scored_files = []
+
+        for filename, file_data in METADATA_DATA.items():
+            # 兼容处理 content
+            if isinstance(file_data, dict):
+                content = file_data.get("content", str(file_data))
+            else:
+                content = str(file_data)
+
+            content_lower = content.lower()
+            score = 0
+
+            # 简单的关键词匹配打分
+            for word in keywords:
+                if word in content_lower:
+                    score += content_lower.count(word)
+                if word in filename.lower():
+                    score += 50
+
+            if score > 0:
+                # 截断内容以节省 Token
+                preview = content[:2000] + "..." if len(content) > 2000 else content
+                scored_files.append({"title": filename, "score": score, "content": preview})
+
+        # 按分数排序取前3
+        scored_files.sort(key=lambda x: x["score"], reverse=True)
+        top_files = scored_files[:3]
+
+        if not top_files:
+            return ["No relevant files found. Try different keywords."]
+
+        return [f"Title: {f['title']}\nContent: {f['content']}" for f in top_files]
+
+    except Exception as e:
+        return [f"Error searching files: {str(e)}"]
+
+
+# ==========================================
+# Main Execution
+# ==========================================
+
+def run_agent():
+    # 1. 配置
+    # 文档指出：直接把函数放入 tools 列表，SDK 会自动生成 Schema
+    config = types.GenerateContentConfig(
+        tools=[retrieve_user_knowledge, select_files],
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            disable=False,
+            maximum_remote_calls=3,  # 限制调用次数，防止 429
+        ),
+        system_instruction="""
+        You are an intelligent tutor. 
+        1. Always check user knowledge first.
+        2. Then search for files (remember to expand keywords!).
+        3. Finally, answer the user's question based on the file content found.
+        DO NOT ask to call a reply tool. Just answer naturally.
+        """
+    )
+
+    # 2. 创建 Chat
+    chat = client.chats.create(
+        model=MODEL_NAME,
+        config=config
+    )
+
+    user_query = "给我总结这学期天⽂课上的所有内容"
+    print(f"User: {user_query}")
+
+    try:
+        # 3. 发送消息
+        # SDK 会自动：调用 retrieve_user_knowledge -> 调用 select_files -> 拿到结果 -> 生成最终文本
+        response = chat.send_message(user_query)
+
+        # 4. 打印最终结果
+        print("\n" + "=" * 30)
+        print("Agent Final Response:")
+        print("=" * 30)
+        print(response.text)
+
+    except Exception as e:
+        print(f"\n[Error]: {e}")
+
+
+if __name__ == "__main__":
+    run_agent()
